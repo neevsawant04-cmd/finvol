@@ -2,13 +2,45 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from copy import deepcopy
+from functools import wraps
 from io import BytesIO
+from threading import RLock
+from time import monotonic
 from typing import Any
 from urllib.request import Request, urlopen
 
 import pandas as pd
-import streamlit as st
 import yfinance as yf
+
+
+def _ttl_cache(seconds: int, maxsize: int = 64):
+    """Small thread-safe TTL cache shared by the Streamlit app and API process."""
+    def decorate(function):
+        cache: OrderedDict[tuple[Any, ...], tuple[float, Any]] = OrderedDict()
+        lock = RLock()
+
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            key = (args, tuple(sorted(kwargs.items())))
+            now = monotonic()
+            with lock:
+                entry = cache.get(key)
+                if entry is not None and now - entry[0] < seconds:
+                    cache.move_to_end(key)
+                    return deepcopy(entry[1])
+            value = function(*args, **kwargs)
+            with lock:
+                cache[key] = (monotonic(), value)
+                cache.move_to_end(key)
+                while len(cache) > maxsize:
+                    cache.popitem(last=False)
+            return deepcopy(value)
+
+        return wrapped
+
+    return decorate
 
 
 MARKET_PRESETS: dict[str, dict[str, Any]] = {
@@ -157,7 +189,7 @@ NIFTY500_FALLBACK = tuple(MARKET_PRESETS["Indian Market (NSE)"]["tickers"])
 YFINANCE_TICKER_FALLBACKS = {"BAGMANE.NS": ("BAGMANE.BO", "544758.BO")}
 
 
-@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+@_ttl_cache(seconds=24 * 60 * 60)
 def load_nifty500_tickers() -> tuple[tuple[str, ...], str]:
     """Load the current NIFTY 500 constituents, falling back to the core NSE list."""
     try:
@@ -223,7 +255,7 @@ def _extract_symbol_history(
     return download if len(batch_symbols) == 1 else pd.DataFrame()
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@_ttl_cache(seconds=3600, maxsize=32)
 def fetch_market_data(
     tickers: tuple[str, ...], benchmark: str, period: str
 ) -> tuple[pd.DataFrame, pd.Series, dict[str, float], dict[str, str]]:
@@ -232,7 +264,8 @@ def fetch_market_data(
     Symbols are downloaded in small batches so a broad constituent universe
     does not require one request per ticker. A failed or invalid symbol does not
     prevent other symbols in its batch from being used. Historical series are
-    aligned to the benchmark's available trading dates before they are returned.
+    returned with their own available dates. Consumers align return series by
+    date after calculating each symbol's own close-to-close returns.
     """
     requested = list(dict.fromkeys(ticker.strip().upper() for ticker in tickers if ticker.strip()))
     symbols = list(dict.fromkeys([*requested, benchmark.strip().upper()]))
@@ -296,7 +329,7 @@ def fetch_market_data(
     if benchmark_prices.empty:
         return pd.DataFrame(index=pd.DatetimeIndex([])), benchmark_prices, spots, errors
 
-    aligned: dict[str, pd.Series] = {}
+    available: dict[str, pd.Series] = {}
     for symbol in requested:
         series = raw_prices.get(symbol)
         if series is None:
@@ -305,8 +338,8 @@ def fetch_market_data(
         if pair.empty:
             errors[symbol] = "No overlapping trading dates with the benchmark."
             continue
-        aligned[symbol] = pair[symbol]
+        available[symbol] = series
 
-    prices_frame = pd.DataFrame(aligned).sort_index() if aligned else pd.DataFrame(index=benchmark_prices.index)
+    prices_frame = pd.DataFrame(available).sort_index() if available else pd.DataFrame(index=benchmark_prices.index)
     return prices_frame, benchmark_prices, spots, errors
 
