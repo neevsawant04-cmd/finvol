@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from typing import Any
+from urllib.request import Request, urlopen
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
@@ -41,31 +42,145 @@ MARKET_PRESETS: dict[str, dict[str, Any]] = {
     "NASDAQ": {
         "tickers": [
             "AAPL",
-            "MSFT",
-            "NVDA",
-            "GOOGL",
-            "AMZN",
-            "META",
-            "TSLA",
-            "AVGO",
-            "COST",
-            "NFLX",
-            "AMD",
-            "INTC",
+            "ABNB",
             "ADBE",
-            "CSCO",
-            "QCOM",
-            "TXN",
+            "ADI",
+            "ADP",
+            "ADSK",
+            "AEP",
+            "ALAB",
+            "ALNY",
             "AMAT",
-            "LRCX",
-            "MU",
+            "AMD",
+            "AMGN",
+            "AMZN",
+            "APP",
+            "ARM",
+            "ASML",
+            "AVGO",
+            "AXON",
+            "BKNG",
+            "BKR",
+            "CCEP",
+            "CDNS",
+            "CEG",
+            "CMCSA",
+            "COST",
+            "CPRT",
+            "CRWD",
+            "CRWV",
+            "CSCO",
+            "CSX",
+            "CTAS",
+            "DASH",
+            "DDOG",
+            "DXCM",
+            "EXC",
+            "FANG",
+            "FAST",
+            "FER",
+            "FTNT",
+            "GEHC",
+            "GILD",
+            "GOOG",
+            "GOOGL",
+            "HON",
+            "HONA",
+            "IDXX",
+            "INTC",
+            "INTU",
             "ISRG",
+            "KDP",
+            "KHC",
+            "KLAC",
+            "LIN",
+            "LITE",
+            "LRCX",
+            "MAR",
+            "MCHP",
+            "MDLZ",
+            "MELI",
+            "META",
+            "MNST",
+            "MPWR",
+            "MRVL",
+            "MSFT",
+            "MSTR",
+            "MU",
+            "NBIS",
+            "NFLX",
+            "NVDA",
+            "NXPI",
+            "ODFL",
+            "ORLY",
+            "PANW",
+            "PAYX",
+            "PCAR",
+            "PDD",
+            "PEP",
+            "PLTR",
+            "PYPL",
+            "QCOM",
+            "REGN",
+            "RKLB",
+            "ROP",
+            "ROST",
+            "SBUX",
+            "SHOP",
+            "SNDK",
+            "SNPS",
+            "SPCX",
+            "STX",
+            "TER",
+            "TMUS",
+            "TRI",
+            "TSLA",
+            "TTWO",
+            "TXN",
+            "VRTX",
+            "WBD",
+            "WDAY",
+            "WDC",
+            "WMT",
+            "XEL",
         ],
         "benchmark": "^IXIC",
         "risk_free_rate": 0.0485,
         "currency": "$",
     },
 }
+
+NIFTY500_CONSTITUENTS_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv"
+NIFTY500_FALLBACK = tuple(MARKET_PRESETS["Indian Market (NSE)"]["tickers"])
+
+
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def load_nifty500_tickers() -> tuple[tuple[str, ...], str]:
+    """Load the current NIFTY 500 constituents, falling back to the core NSE list."""
+    try:
+        request = Request(
+            NIFTY500_CONSTITUENTS_URL,
+            headers={
+                "User-Agent": "Mozilla/5.0 (compatible; StockRiskReturnDashboard/1.0)",
+                "Referer": "https://www.niftyindices.com/",
+            },
+        )
+        with urlopen(request, timeout=15) as response:
+            constituent_file = response.read()
+        constituents = pd.read_csv(BytesIO(constituent_file))
+        symbol_column = next((column for column in constituents.columns if str(column).strip().lower() == "symbol"), None)
+        if symbol_column is None:
+            raise ValueError("The constituent file has no Symbol column")
+        symbols = constituents[symbol_column].dropna().astype(str).str.strip().str.upper()
+        tickers = tuple(dict.fromkeys(f"{symbol}.NS" for symbol in symbols if symbol and symbol != "NAN"))
+        if len(tickers) < 400:
+            raise ValueError(f"Only {len(tickers)} constituents were returned")
+        return tickers, ""
+    except Exception as exc:
+        return NIFTY500_FALLBACK, (
+            "The current NIFTY 500 list was unavailable; using the built-in NSE fallback list "
+            f"({type(exc).__name__})."
+        )
 
 
 def _clean_history(history: pd.DataFrame) -> pd.Series:
@@ -82,17 +197,21 @@ def _clean_history(history: pd.DataFrame) -> pd.Series:
     return series.astype(float)
 
 
-def _latest_spot(ticker: yf.Ticker, history_prices: pd.Series) -> float:
-    """Prefer the current yfinance quote, with last adjusted close as fallback."""
-    try:
-        fast_info = ticker.fast_info
-        value = fast_info.get("last_price") if fast_info is not None else None
-        spot = float(value) if value is not None else np.nan
-        if np.isfinite(spot) and spot > 0:
-            return spot
-    except Exception:
-        pass
-    return float(history_prices.iloc[-1]) if not history_prices.empty else np.nan
+def _extract_symbol_history(
+    download: pd.DataFrame, symbol: str, batch_symbols: tuple[str, ...]
+) -> pd.DataFrame:
+    """Select one symbol from yfinance's ticker-grouped multi-symbol result."""
+    if download is None or download.empty:
+        return pd.DataFrame()
+    if isinstance(download.columns, pd.MultiIndex):
+        for level in range(download.columns.nlevels):
+            if symbol in download.columns.get_level_values(level):
+                try:
+                    return download.xs(symbol, axis=1, level=level, drop_level=True)
+                except KeyError:
+                    continue
+        return pd.DataFrame()
+    return download if len(batch_symbols) == 1 else pd.DataFrame()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -101,9 +220,10 @@ def fetch_market_data(
 ) -> tuple[pd.DataFrame, pd.Series, dict[str, float], dict[str, str]]:
     """Fetch adjusted closes and spot prices; cache results for one hour.
 
-    Each symbol is fetched independently so one invalid ticker does not prevent
-    the rest of the universe from loading. Historical series are aligned to the
-    benchmark's available trading dates before they are returned.
+    Symbols are downloaded in small batches so a broad constituent universe
+    does not require one request per ticker. A failed or invalid symbol does not
+    prevent other symbols in its batch from being used. Historical series are
+    aligned to the benchmark's available trading dates before they are returned.
     """
     requested = list(dict.fromkeys(ticker.strip().upper() for ticker in tickers if ticker.strip()))
     symbols = list(dict.fromkeys([*requested, benchmark.strip().upper()]))
@@ -111,18 +231,35 @@ def fetch_market_data(
     spots: dict[str, float] = {}
     errors: dict[str, str] = {}
 
-    for symbol in symbols:
+    batch_size = 40
+    for start in range(0, len(symbols), batch_size):
+        batch_symbols = tuple(symbols[start : start + batch_size])
         try:
-            instrument = yf.Ticker(symbol)
-            history = instrument.history(period=period, auto_adjust=False, actions=False)
+            download = yf.download(
+                tickers=list(batch_symbols),
+                period=period,
+                auto_adjust=False,
+                actions=False,
+                group_by="ticker",
+                threads=True,
+                progress=False,
+                timeout=20,
+            )
+        except Exception as exc:  # yfinance errors vary by provider and ticker
+            for symbol in batch_symbols:
+                errors[symbol] = f"Data could not be loaded ({type(exc).__name__})."
+            continue
+
+        for symbol in batch_symbols:
+            history = _extract_symbol_history(download, symbol, batch_symbols)
             prices = _clean_history(history)
             if prices.empty:
                 errors[symbol] = "No historical prices returned. Check the ticker or lookback period."
                 continue
             raw_prices[symbol] = prices
-            spots[symbol] = _latest_spot(instrument, prices)
-        except Exception as exc:  # yfinance errors vary by provider and ticker
-            errors[symbol] = f"Data could not be loaded ({type(exc).__name__})."
+            # Use the latest available yfinance adjusted close as the price
+            # reference, avoiding a separate quote request for every symbol.
+            spots[symbol] = float(prices.iloc[-1])
 
     benchmark_symbol = benchmark.strip().upper()
     benchmark_prices = raw_prices.get(benchmark_symbol, pd.Series(dtype=float, name="Benchmark"))
