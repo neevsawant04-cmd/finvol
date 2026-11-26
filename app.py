@@ -241,7 +241,7 @@ with st.expander("Method and assumptions"):
         - **Tail loss:** historical 95% VaR and CVaR from overlapping 21-session returns. CVaR is the average loss in the worst 5% of those observed windows. It can understate losses that did not occur in the selected history.
         - **Walk-forward simulation:** uses trailing 63-session volatility to set next-session exposure, caps stock exposure at 100%, credits uninvested cash at the selected risk-free rate, and applies the transaction cost you choose.
 
-        These are historical estimates and simulations, not forecasts or guarantees. The default stock lists represent currently available constituents, so historical comparisons may have survivorship bias. The simulation does not include taxes, market impact, liquidity limits, or intraday execution.
+        These are historical estimates and simulations, not forecasts or guarantees. The default stock lists represent currently available constituents, so historical comparisons may have survivorship bias. The selected stock is chosen from metrics calculated over the full displayed lookback, so this is not an out-of-sample stock-selection test. The simulation does not include taxes, market impact, liquidity limits, or intraday execution.
         """
     )
 
@@ -393,7 +393,7 @@ with right:
 st.subheader("Walk-forward risk-control simulation")
 st.caption(
     "A historical paper simulation for the selected stock. Each session's exposure uses only earlier returns; "
-    "the rule is not optimized to maximize historical performance."
+    "the rule is not optimized to maximize historical performance. Stock selection still uses the full displayed lookback."
 )
 setting_left, setting_right = st.columns(2)
 with setting_left:
