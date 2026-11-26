@@ -23,6 +23,16 @@ MARKET_PRESETS: dict[str, dict[str, Any]] = {
             "ITC.NS",
             "LT.NS",
             "BAJFINANCE.NS",
+            "KOTAKBANK.NS",
+            "AXISBANK.NS",
+            "WIPRO.NS",
+            "HCLTECH.NS",
+            "SUNPHARMA.NS",
+            "MARUTI.NS",
+            "TITAN.NS",
+            "ASIANPAINT.NS",
+            "HINDUNILVR.NS",
+            "ONGC.NS",
         ],
         "benchmark": "^NSEI",
         "risk_free_rate": 0.072,
@@ -40,6 +50,16 @@ MARKET_PRESETS: dict[str, dict[str, Any]] = {
             "AVGO",
             "COST",
             "NFLX",
+            "AMD",
+            "INTC",
+            "ADBE",
+            "CSCO",
+            "QCOM",
+            "TXN",
+            "AMAT",
+            "LRCX",
+            "MU",
+            "ISRG",
         ],
         "benchmark": "^IXIC",
         "risk_free_rate": 0.0485,
@@ -122,3 +142,4 @@ def fetch_market_data(
 
     prices_frame = pd.DataFrame(aligned).sort_index() if aligned else pd.DataFrame(index=benchmark_prices.index)
     return prices_frame, benchmark_prices, spots, errors
+
