@@ -10,7 +10,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from data_loader import MARKET_PRESETS, fetch_market_data
+from data_loader import MARKET_PRESETS, fetch_market_data, load_nifty500_tickers
 from metrics import calculate_stock_metrics, capm_regression_data
 
 
@@ -103,20 +103,33 @@ with st.sidebar:
         placeholder="e.g. WIPRO.NS, HCLTECH.NS or AMD",
     )
 
-requested_tickers = list(preset["tickers"])
+universe_warning = ""
+if market_name == "Indian Market (NSE)":
+    default_tickers, universe_warning = load_nifty500_tickers()
+else:
+    default_tickers = tuple(preset["tickers"])
+
+requested_tickers = list(default_tickers)
 for item in custom_input.split(","):
     ticker = item.strip().upper()
     if ticker and ticker not in requested_tickers:
         requested_tickers.append(ticker)
+st.sidebar.caption(f"Default universe: {len(default_tickers)} stocks, plus any custom tickers.")
+if universe_warning:
+    st.sidebar.warning(universe_warning)
 
 with st.spinner("Loading adjusted prices and benchmark data…"):
     prices, benchmark_prices, spot_prices, load_errors = fetch_market_data(
         tuple(requested_tickers), str(preset["benchmark"]), period
     )
 
+if universe_warning:
+    st.warning(universe_warning)
 if load_errors:
-    unavailable = ", ".join(load_errors)
-    st.warning(f"Some symbols could not be loaded: {unavailable}")
+    error_symbols = list(load_errors)
+    preview = ", ".join(error_symbols[:12])
+    remainder = f" and {len(error_symbols) - 12} more" if len(error_symbols) > 12 else ""
+    st.warning(f"{len(error_symbols)} symbols could not be loaded: {preview}{remainder}")
     with st.expander("Data loading details"):
         for symbol, message in load_errors.items():
             st.write(f"**{symbol}:** {message}")
@@ -181,7 +194,7 @@ matches = universe[
 st.subheader("Portfolio screen")
 st.caption(
     f"Benchmark: {preset['benchmark']} · Lookback: {period} · Risk-free rate: {annual_rf:.2%} · "
-    f"Prices and returns use adjusted daily closes; spot prices use the latest available quote."
+    f"Returns use adjusted daily closes; price filters use the latest available adjusted close."
 )
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Matching stocks", f"{len(matches)} / {len(universe)}")
@@ -366,3 +379,4 @@ st.caption(
     "Tentative 1-year price ranges and VaR are statistical estimates based on historical data and the selected lookback period. "
     "They are not forecasts or financial advice."
 )
+
