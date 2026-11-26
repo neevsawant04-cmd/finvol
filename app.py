@@ -12,7 +12,11 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import data_loader as _data_loader
-from metrics import calculate_stock_metrics, capm_regression_data
+from metrics import (
+    calculate_stock_metrics,
+    capm_regression_data,
+    volatility_target_backtest,
+)
 
 
 # Streamlit may rerun app.py while retaining an older imported data_loader
@@ -104,7 +108,7 @@ def _percent(value: float, digits: int = 2) -> str:
 
 
 st.title("Stock Risk & Return Calculator")
-st.caption("Screen NSE and NASDAQ stocks using historical returns, risk measures and CAPM estimates.")
+st.caption("Screen NSE and NASDAQ stocks with conservative return estimates, historical tail risk and a cost-aware risk-control simulation.")
 
 with st.sidebar:
     st.header("Market & lookback")
@@ -189,8 +193,8 @@ with st.sidebar:
     price_range = _range_slider(
         f"Current price ({currency})", universe["current_price"], "price_filter", "%.2f"
     )
-    return_choice = st.selectbox("Return filter metric", ["Expected Return", "CAGR"])
-    return_column = "expected_return" if return_choice == "Expected Return" else "cagr"
+    return_choice = st.selectbox("Return filter metric", ["Shrunk Return Estimate", "CAGR"])
+    return_column = "expected_return" if return_choice == "Shrunk Return Estimate" else "cagr"
     return_range = _range_slider(
         f"{return_choice} range (%)", universe[return_column] * 100, "return_filter", "%.1f%%"
     )
@@ -198,7 +202,12 @@ with st.sidebar:
     max_drawdown = _max_slider(
         "Maximum drawdown (%)", universe["max_drawdown"] * 100, "drawdown_filter", "%.1f%%"
     )
-    max_var95 = _max_slider("Maximum annual VaR 95% (%)", universe["var95"] * 100, "var_filter", "%.1f%%")
+    max_cvar95 = _max_slider(
+        "Maximum historical 1M CVaR 95% (%)",
+        universe["cvar95_1m"] * 100,
+        "cvar_filter",
+        "%.1f%%",
+    )
     volatility_range = _range_slider(
         "Annual volatility range (%)", universe["volatility"] * 100, "volatility_filter", "%.1f%%"
     )
@@ -208,25 +217,37 @@ matches = universe[
     & (universe[return_column] * 100).between(*return_range)
     & universe["beta"].le(max_beta)
     & (universe["max_drawdown"] * 100).le(max_drawdown)
-    & (universe["var95"] * 100).le(max_var95)
+    & (universe["cvar95_1m"] * 100).le(max_cvar95)
     & (universe["volatility"] * 100).between(*volatility_range)
 ].copy()
 
 st.subheader("Portfolio screen")
 st.caption(
     f"Benchmark: {preset['benchmark']} · Lookback: {period} · Risk-free rate: {annual_rf:.2%} · "
-    f"Returns use adjusted daily closes; price filters use the latest available adjusted close."
+    f"Risk uses adjusted daily closes; price filters use the latest available adjusted close."
 )
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Matching stocks", f"{len(matches)} / {len(universe)}")
-k2.metric("Average expected return", _percent(float(matches["expected_return"].mean())) if not matches.empty else "—")
-k3.metric("Average volatility", _percent(float(matches["volatility"].mean())) if not matches.empty else "—")
-best_sharpe = matches["sharpe"].max() if not matches.empty else np.nan
-k4.metric("Best Sharpe ratio", f"{best_sharpe:.2f}" if np.isfinite(best_sharpe) else "—")
+k2.metric("Average shrunk return estimate", _percent(float(matches["expected_return"].mean())) if not matches.empty else "—")
+k3.metric("Average historical 1M CVaR 95%", _percent(float(matches["cvar95_1m"].mean())) if not matches.empty else "—")
+median_volatility = matches["volatility"].median() if not matches.empty else np.nan
+k4.metric("Median EWMA volatility", _percent(float(median_volatility)) if np.isfinite(median_volatility) else "—")
+
+with st.expander("Method and assumptions"):
+    st.markdown(
+        """
+        - **Return estimate:** measured excess return is shrunk toward zero using a normal prior with a 10% annual standard deviation. The table also shows the weight placed on the historical signal; it is not a probability of profit.
+        - **Volatility:** exponentially weighted daily volatility (decay factor 0.94), annualized over 252 sessions.
+        - **Tail loss:** historical 95% VaR and CVaR from overlapping 21-session returns. CVaR is the average loss in the worst 5% of those observed windows. It can understate losses that did not occur in the selected history.
+        - **Walk-forward simulation:** uses trailing 63-session volatility to set next-session exposure, caps stock exposure at 100%, credits uninvested cash at the selected risk-free rate, and applies the transaction cost you choose.
+
+        These are historical estimates and simulations, not forecasts or guarantees. The default stock lists represent currently available constituents, so historical comparisons may have survivorship bias. The simulation does not include taxes, market impact, liquidity limits, or intraday execution.
+        """
+    )
 
 if matches.empty:
     st.info("No stocks match the current filter settings. Widen one or more sidebar ranges to see results.")
-    st.caption("Tentative returns and risks are historical statistical estimates, not financial advice.")
+    st.caption("Return and risk estimates are historical statistics, not forecasts or guarantees.")
     st.stop()
 
 st.subheader("Interactive screener")
@@ -235,12 +256,14 @@ display = matches[
         "current_price",
         "cagr",
         "expected_return",
-        "tentative_price_low",
-        "tentative_price_high",
+        "return_signal_weight",
         "volatility",
+        "historical_volatility",
         "beta",
         "max_drawdown",
-        "var95",
+        "var95_1m",
+        "cvar95_1m",
+        "worst_1m_loss",
         "sharpe",
         "sortino",
         "treynor",
@@ -253,13 +276,15 @@ display = display.rename(
     columns={
         "current_price": "Current Price",
         "cagr": "CAGR",
-        "expected_return": "Expected Return",
-        "tentative_price_low": "Tentative 1Y Low",
-        "tentative_price_high": "Tentative 1Y High",
-        "volatility": "Volatility",
+        "expected_return": "Shrunk Return Estimate",
+        "return_signal_weight": "Return Signal Weight",
+        "volatility": "EWMA Volatility",
+        "historical_volatility": "Historical Volatility",
         "beta": "Beta",
         "max_drawdown": "Max Drawdown",
-        "var95": "VaR 95% (annual)",
+        "var95_1m": "Historical VaR 95% (1M)",
+        "cvar95_1m": "Historical CVaR 95% (1M)",
+        "worst_1m_loss": "Worst Historical 1M Loss",
         "sharpe": "Sharpe",
         "sortino": "Sortino",
         "treynor": "Treynor",
@@ -267,15 +292,18 @@ display = display.rename(
         "r_squared": "CAPM R²",
     }
 )
-display.insert(
-    5,
-    "Tentative 1Y Range",
-    display["Tentative 1Y Low"].map(lambda value: _money(value, currency))
-    + " – "
-    + display["Tentative 1Y High"].map(lambda value: _money(value, currency)),
-)
-display = display.drop(columns=["Tentative 1Y Low", "Tentative 1Y High"])
-percent_columns = ["CAGR", "Expected Return", "Volatility", "Max Drawdown", "VaR 95% (annual)", "Jensen's Alpha"]
+percent_columns = [
+    "CAGR",
+    "Shrunk Return Estimate",
+    "Return Signal Weight",
+    "EWMA Volatility",
+    "Historical Volatility",
+    "Max Drawdown",
+    "Historical VaR 95% (1M)",
+    "Historical CVaR 95% (1M)",
+    "Worst Historical 1M Loss",
+    "Jensen's Alpha",
+]
 for column in percent_columns:
     display[column] = display[column].map(lambda value: _percent(float(value)))
 for column in ["Current Price"]:
@@ -296,12 +324,12 @@ st.download_button(
 st.subheader("Risk versus return")
 scatter_data = matches.copy()
 scatter_data["Annualized Volatility (%)"] = scatter_data["volatility"] * 100
-scatter_data["Annualized Expected Return (%)"] = scatter_data["expected_return"] * 100
+scatter_data["Shrunk Return Estimate (%)"] = scatter_data["expected_return"] * 100
 scatter_data["Current Price"] = scatter_data["current_price"]
 fig = px.scatter(
     scatter_data,
     x="Annualized Volatility (%)",
-    y="Annualized Expected Return (%)",
+    y="Shrunk Return Estimate (%)",
     size="Current Price",
     color="sharpe",
     hover_name="ticker",
@@ -310,7 +338,7 @@ fig = px.scatter(
         "cagr": ":.2%",
         "beta": ":.2f",
         "max_drawdown": ":.2%",
-        "var95": ":.2%",
+        "cvar95_1m": ":.2%",
         "sharpe": ":.2f",
         "sortino": ":.2f",
         "treynor": ":.2f",
@@ -320,9 +348,9 @@ fig = px.scatter(
     color_continuous_scale="RdYlGn",
     size_max=48,
     labels={"sharpe": "Sharpe Ratio"},
-    title="Annualized volatility and expected return",
+    title="EWMA volatility and shrunk return estimate",
 )
-fig.update_layout(xaxis_title="Annualized volatility (%)", yaxis_title="Annualized expected return (%)", coloraxis_colorbar_title="Sharpe")
+fig.update_layout(xaxis_title="Annualized EWMA volatility (%)", yaxis_title="Shrunk return estimate (%)", coloraxis_colorbar_title="Estimated Sharpe")
 st.plotly_chart(fig, use_container_width=True)
 
 st.subheader("Deep-dive stock inspector")
@@ -362,6 +390,70 @@ with right:
     drawdown_fig.update_layout(xaxis_title="Date", yaxis_title="Drawdown", yaxis_tickformat=".0%", legend_title="Series")
     st.plotly_chart(drawdown_fig, use_container_width=True)
 
+st.subheader("Walk-forward risk-control simulation")
+st.caption(
+    "A historical paper simulation for the selected stock. Each session's exposure uses only earlier returns; "
+    "the rule is not optimized to maximize historical performance."
+)
+setting_left, setting_right = st.columns(2)
+with setting_left:
+    target_volatility = st.slider(
+        "Target annual volatility",
+        min_value=5,
+        max_value=40,
+        value=15,
+        step=1,
+        format="%d%%",
+    ) / 100.0
+with setting_right:
+    transaction_cost_bps = st.slider(
+        "Estimated transaction cost per side (basis points)",
+        min_value=0,
+        max_value=100,
+        value=10,
+        step=1,
+    )
+
+simulation = volatility_target_backtest(
+    selected_prices,
+    benchmark_prices,
+    annual_rf,
+    target_annual_volatility=target_volatility,
+    transaction_cost_bps=transaction_cost_bps,
+)
+if simulation["summary"].empty:
+    st.info("There is not enough aligned history for the 63-session warm-up and walk-forward comparison.")
+else:
+    summary_display = simulation["summary"].copy()
+    for column in ["Total Return", "CAGR", "Annual Volatility", "Max Drawdown", "Worst 1M Loss"]:
+        summary_display[column] = summary_display[column].map(lambda value: _percent(float(value)))
+    summary_display["Sharpe"] = summary_display["Sharpe"].map(
+        lambda value: f"{float(value):.2f}" if np.isfinite(value) else "—"
+    )
+    st.dataframe(summary_display, use_container_width=True, hide_index=True)
+    st.caption(
+        f"Estimated total turnover: {simulation['estimated_turnover']:.2f}× · "
+        f"Estimated transaction-cost drag: {_percent(simulation['estimated_cost_drag'])}. "
+        "The rule can lag a rising market and still lose money; lower simulated volatility does not guarantee a smaller future loss."
+    )
+    wealth_frame = simulation["wealth"].rename_axis("Date").reset_index()
+    wealth_fig = px.line(
+        wealth_frame,
+        x="Date",
+        y=list(simulation["wealth"].columns),
+        title="After-cost cumulative value (starting at 1.0)",
+    )
+    wealth_fig.update_layout(xaxis_title="Date", yaxis_title="Portfolio value", legend_title="Simulation")
+    st.plotly_chart(wealth_fig, use_container_width=True)
+    exposure_fig = px.line(
+        simulation["exposure"].rename("Stock exposure").rename_axis("Date").reset_index(),
+        x="Date",
+        y="Stock exposure",
+        title="Lagged, unlevered stock exposure",
+    )
+    exposure_fig.update_layout(xaxis_title="Date", yaxis_title="Exposure", yaxis_tickformat=".0%", yaxis_range=[0, 1])
+    st.plotly_chart(exposure_fig, use_container_width=True)
+
 st.markdown("**CAPM regression: stock excess return versus benchmark excess return**")
 fit_data, capm_stats = capm_regression_data(pair["Stock"], pair["Benchmark"], annual_rf)
 if fit_data.empty:
@@ -397,7 +489,6 @@ else:
     st.plotly_chart(reg_fig, use_container_width=True)
 
 st.caption(
-    "Tentative 1-year price ranges and VaR are statistical estimates based on historical data and the selected lookback period. "
-    "They are not forecasts or financial advice."
+    "Historical risk and return estimates do not predict future outcomes. The walk-forward simulation is illustrative and cannot eliminate losses."
 )
 
