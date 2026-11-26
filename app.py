@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Iterable
 import importlib
 
@@ -12,6 +13,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import data_loader as _data_loader
+from api_client import BackendRequestError, post_json
 from metrics import (
     calculate_stock_metrics,
     capm_regression_data,
@@ -107,8 +109,32 @@ def _percent(value: float, digits: int = 2) -> str:
     return f"{value:.{digits}%}"
 
 
+def _setting(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+    try:
+        return str(st.secrets.get(name, "")).strip()
+    except Exception:
+        return ""
+
+
+def _series_from_points(points: list[dict], name: str) -> pd.Series:
+    dates = pd.to_datetime([point["date"] for point in points])
+    values = [float(point["price"]) for point in points]
+    return pd.Series(values, index=dates, name=name, dtype=float).sort_index()
+
+
+BACKEND_URL = _setting("STOCK_API_URL").rstrip("/")
+BACKEND_API_KEY = _setting("STOCK_API_KEY")
+
+
 st.title("Stock Risk & Return Calculator")
 st.caption("Screen NSE and NASDAQ stocks with conservative return estimates, historical tail risk and a cost-aware risk-control simulation.")
+if BACKEND_URL:
+    st.sidebar.success(f"Using analysis backend: {BACKEND_URL}")
+else:
+    st.sidebar.caption("Backend URL is not set; analysis runs in this Streamlit process.")
 
 with st.sidebar:
     st.header("Market & lookback")
@@ -143,10 +169,41 @@ st.sidebar.caption(f"Default universe: {len(default_tickers)} stocks, plus any c
 if universe_warning:
     st.sidebar.warning(universe_warning)
 
-with st.spinner("Loading adjusted prices and benchmark data…"):
-    prices, benchmark_prices, spot_prices, load_errors = fetch_market_data(
-        tuple(requested_tickers), str(preset["benchmark"]), period
-    )
+if BACKEND_URL:
+    with st.spinner("Requesting the stock screen from the backend…"):
+        try:
+            backend_screen = post_json(
+                BACKEND_URL,
+                "/v1/screen",
+                {
+                    "market": market_name,
+                    "tickers": requested_tickers,
+                    "period": period,
+                    "annual_risk_free_rate": annual_rf,
+                },
+                api_key=BACKEND_API_KEY,
+            )
+        except BackendRequestError as exc:
+            st.error(f"Stock backend request failed: {exc}")
+            st.stop()
+    prices = pd.DataFrame()
+    benchmark_prices = pd.Series(dtype=float, name="Benchmark")
+    spot_prices: dict[str, float] = {}
+    load_errors = backend_screen.get("load_errors", {})
+    for warning in backend_screen.get("warnings", []):
+        if warning:
+            universe_warning = f"{universe_warning} {warning}".strip()
+    rows: list[dict[str, object]] = []
+    for result in backend_screen.get("results", []):
+        row = dict(result.get("metrics", {}))
+        row["ticker"] = result["ticker"]
+        rows.append(row)
+else:
+    with st.spinner("Loading adjusted prices and benchmark data…"):
+        prices, benchmark_prices, spot_prices, load_errors = fetch_market_data(
+            tuple(requested_tickers), str(preset["benchmark"]), period
+        )
+    rows = []
 
 if universe_warning:
     st.warning(universe_warning)
@@ -159,29 +216,29 @@ if load_errors:
         for symbol, message in load_errors.items():
             st.write(f"**{symbol}:** {message}")
 
-if benchmark_prices.empty:
+if not BACKEND_URL and benchmark_prices.empty:
     st.error(f"No benchmark history was available for {preset['benchmark']}. Check the connection and try again.")
     st.caption("The dashboard uses Yahoo Finance through yfinance. Historical data availability can vary by symbol and region.")
     st.stop()
 
-rows: list[dict[str, object]] = []
-for symbol in prices.columns:
-    stock_prices = prices[symbol].dropna()
-    calculated = calculate_stock_metrics(
-        stock_prices,
-        benchmark_prices,
-        annual_rf,
-        current_price=spot_prices.get(symbol),
-    )
-    if not calculated:
-        continue
-    row = {key: value for key, value in calculated.items() if not isinstance(value, (pd.Series, pd.DataFrame))}
-    row["ticker"] = symbol
-    rows.append(row)
+if not BACKEND_URL:
+    for symbol in prices.columns:
+        stock_prices = prices[symbol].dropna()
+        calculated = calculate_stock_metrics(
+            stock_prices,
+            benchmark_prices,
+            annual_rf,
+            current_price=spot_prices.get(symbol),
+        )
+        if not calculated:
+            continue
+        row = {key: value for key, value in calculated.items() if not isinstance(value, (pd.Series, pd.DataFrame))}
+        row["ticker"] = symbol
+        rows.append(row)
 
 if not rows:
     st.info("No valid stock and benchmark pairs are available for this market and period. Try another lookback or check ticker symbols.")
-    st.caption("Tentative returns and risks are historical statistical estimates, not financial advice.")
+    st.caption("Return and risk estimates are historical statistics, not forecasts or guarantees.")
     st.stop()
 
 universe = pd.DataFrame(rows).set_index("ticker", drop=False)
@@ -355,7 +412,21 @@ st.plotly_chart(fig, use_container_width=True)
 
 st.subheader("Deep-dive stock inspector")
 selected = st.selectbox("Stock", list(matches.index), format_func=lambda symbol: str(symbol))
-selected_prices = prices[selected].dropna()
+if BACKEND_URL:
+    try:
+        backend_history = post_json(
+            BACKEND_URL,
+            "/v1/history",
+            {"market": market_name, "ticker": selected, "period": period, "annual_risk_free_rate": annual_rf},
+            api_key=BACKEND_API_KEY,
+        )
+    except BackendRequestError as exc:
+        st.error(f"Could not load selected-stock history from the backend: {exc}")
+        st.stop()
+    selected_prices = _series_from_points(backend_history["stock_prices"], "Stock")
+    benchmark_prices = _series_from_points(backend_history["benchmark_prices"], "Benchmark")
+else:
+    selected_prices = prices[selected].dropna()
 pair = pd.concat(
     [selected_prices.rename("Stock"), benchmark_prices.rename("Benchmark")], axis=1
 ).dropna()
@@ -414,13 +485,45 @@ with setting_right:
         step=1,
     )
 
-simulation = volatility_target_backtest(
-    selected_prices,
-    benchmark_prices,
-    annual_rf,
-    target_annual_volatility=target_volatility,
-    transaction_cost_bps=transaction_cost_bps,
-)
+if BACKEND_URL:
+    try:
+        backend_simulation = post_json(
+            BACKEND_URL,
+            "/v1/simulation",
+            {
+                "market": market_name,
+                "ticker": selected,
+                "period": period,
+                "annual_risk_free_rate": annual_rf,
+                "target_annual_volatility": target_volatility,
+                "transaction_cost_bps": transaction_cost_bps,
+            },
+            api_key=BACKEND_API_KEY,
+        )
+    except BackendRequestError as exc:
+        st.error(f"Could not run the simulation on the backend: {exc}")
+        st.stop()
+    wealth_records = pd.DataFrame(backend_simulation.get("wealth", []))
+    wealth_records["date"] = pd.to_datetime(wealth_records["date"])
+    wealth_frame = wealth_records.set_index("date").drop(columns=["date"], errors="ignore")
+    exposure_records = pd.DataFrame(backend_simulation.get("exposure", []))
+    exposure_records["date"] = pd.to_datetime(exposure_records["date"])
+    exposure_series = exposure_records.set_index("date")["exposure"].rename("Stock exposure")
+    simulation = {
+        "summary": pd.DataFrame(backend_simulation.get("summary", [])),
+        "wealth": wealth_frame,
+        "exposure": exposure_series,
+        "estimated_turnover": float(backend_simulation.get("estimated_turnover", 0.0)),
+        "estimated_cost_drag": float(backend_simulation.get("estimated_cost_drag", 0.0)),
+    }
+else:
+    simulation = volatility_target_backtest(
+        selected_prices,
+        benchmark_prices,
+        annual_rf,
+        target_annual_volatility=target_volatility,
+        transaction_cost_bps=transaction_cost_bps,
+    )
 if simulation["summary"].empty:
     st.info("There is not enough aligned history for the 63-session warm-up and walk-forward comparison.")
 else:
