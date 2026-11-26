@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Iterable
+import importlib
 
 import numpy as np
 import pandas as pd
@@ -10,8 +11,28 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from data_loader import MARKET_PRESETS, fetch_market_data, load_nifty500_tickers
+import data_loader as _data_loader
 from metrics import calculate_stock_metrics, capm_regression_data
+
+
+# Streamlit may rerun app.py while retaining an older imported data_loader
+# module. Reload it if the current source has the NIFTY constituent loader but
+# the in-memory module does not yet expose it.
+if not hasattr(_data_loader, "load_nifty500_tickers"):
+    _data_loader = importlib.reload(_data_loader)
+
+MARKET_PRESETS = _data_loader.MARKET_PRESETS
+fetch_market_data = _data_loader.fetch_market_data
+
+
+def load_nifty500_tickers() -> tuple[tuple[str, ...], str]:
+    loader = getattr(_data_loader, "load_nifty500_tickers", None)
+    if loader is not None:
+        return loader()
+    fallback = tuple(MARKET_PRESETS["Indian Market (NSE)"]["tickers"])
+    return fallback, (
+        "This data_loader.py is an older version; restart Streamlit to load the current NIFTY 500 support."
+    )
 
 
 st.set_page_config(page_title="Stock Risk & Return Calculator", page_icon="📈", layout="wide")
