@@ -152,6 +152,9 @@ MARKET_PRESETS: dict[str, dict[str, Any]] = {
 
 NIFTY500_CONSTITUENTS_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv"
 NIFTY500_FALLBACK = tuple(MARKET_PRESETS["Indian Market (NSE)"]["tickers"])
+# Yahoo does not consistently publish new Indian listings under their NSE
+# suffix. BAGMANE is available under its BSE listing alias instead.
+YFINANCE_TICKER_FALLBACKS = {"BAGMANE.NS": ("BAGMANE.BO", "544758.BO")}
 
 
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
@@ -172,7 +175,13 @@ def load_nifty500_tickers() -> tuple[tuple[str, ...], str]:
         if symbol_column is None:
             raise ValueError("The constituent file has no Symbol column")
         symbols = constituents[symbol_column].dropna().astype(str).str.strip().str.upper()
-        tickers = tuple(dict.fromkeys(f"{symbol}.NS" for symbol in symbols if symbol and symbol != "NAN"))
+        tickers = tuple(
+            dict.fromkeys(
+                f"{symbol}.NS"
+                for symbol in symbols
+                if symbol and symbol != "NAN" and not symbol.startswith("DUMMY")
+            )
+        )
         if len(tickers) < 400:
             raise ValueError(f"Only {len(tickers)} constituents were returned")
         return tickers, ""
@@ -253,6 +262,27 @@ def fetch_market_data(
         for symbol in batch_symbols:
             history = _extract_symbol_history(download, symbol, batch_symbols)
             prices = _clean_history(history)
+            if prices.empty:
+                for alternate in YFINANCE_TICKER_FALLBACKS.get(symbol, ()):
+                    try:
+                        alternate_download = yf.download(
+                            tickers=[alternate],
+                            period=period,
+                            auto_adjust=False,
+                            actions=False,
+                            group_by="ticker",
+                            threads=False,
+                            progress=False,
+                            timeout=20,
+                        )
+                        alternate_history = _extract_symbol_history(
+                            alternate_download, alternate, (alternate,)
+                        )
+                        prices = _clean_history(alternate_history)
+                        if not prices.empty:
+                            break
+                    except Exception:
+                        continue
             if prices.empty:
                 errors[symbol] = "No historical prices returned. Check the ticker or lookback period."
                 continue
