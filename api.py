@@ -12,14 +12,14 @@ import pandas as pd
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from data_loader import MARKET_PRESETS, fetch_market_data, load_nifty500_tickers
+from data_loader import MARKET_PRESETS, fetch_market_data, load_nifty50_tickers
 from metrics import calculate_stock_metrics, volatility_target_backtest
 
 
-MarketName = Literal["Indian Market (NSE)", "NASDAQ"]
+MarketName = Literal["Indian Market (NSE)"]
 Period = Literal["1y", "3y", "5y"]
-MAX_SCREEN_TICKERS = 550
-TICKER_PATTERN = re.compile(r"^[A-Z0-9.^=_-]{1,32}$")
+MAX_SCREEN_TICKERS = 50
+TICKER_PATTERN = re.compile(r"^[A-Z0-9&.^=_-]{1,32}$")
 
 app = FastAPI(
     title="Stock Risk & Return API",
@@ -49,6 +49,7 @@ class SimulationRequest(AnalysisRequest):
 
 class AnalysisItem(BaseModel):
     ticker: str
+    status: str = "ready"
     observations: int
     data_start: str | None
     data_end: str | None
@@ -107,24 +108,21 @@ def _risk_free_rate(market: MarketName, supplied: float | None) -> float:
 
 def _ticker(value: str) -> str:
     symbol = value.strip().upper()
-    if not TICKER_PATTERN.fullmatch(symbol):
-        raise HTTPException(status_code=422, detail=f"Invalid ticker symbol: {value!r}")
+    if not TICKER_PATTERN.fullmatch(symbol) or not symbol.endswith(".NS"):
+        raise HTTPException(status_code=422, detail=f"Only valid NSE symbols ending in .NS are supported: {value!r}")
     return symbol
 
 
 def _screen_tickers(market: MarketName, requested: list[str]) -> tuple[list[str], str]:
     warning = ""
     if not requested:
-        if market == "Indian Market (NSE)":
-            symbols, warning = load_nifty500_tickers()
-            requested = list(symbols)
-        else:
-            requested = list(_market_settings(market)["tickers"])
+        symbols, warning = load_nifty50_tickers()
+        requested = list(symbols)
     symbols = list(dict.fromkeys(_ticker(value) for value in requested))
     if len(symbols) > MAX_SCREEN_TICKERS:
         raise HTTPException(
             status_code=422,
-            detail=f"A screen can contain at most {MAX_SCREEN_TICKERS} unique tickers.",
+            detail=f"A screen can contain at most {MAX_SCREEN_TICKERS} NSE tickers.",
         )
     return symbols, warning
 
@@ -207,12 +205,21 @@ def screen(request: ScreenRequest) -> ScreenResponse:
     results: list[AnalysisItem] = []
     for symbol in symbols:
         if symbol not in prices.columns:
+            results.append(AnalysisItem(
+                ticker=symbol, status="unavailable", observations=0,
+                data_start=None, data_end=None, metrics={},
+            ))
             continue
         calculated = calculate_stock_metrics(
             prices[symbol].dropna(), benchmark, risk_free_rate
         )
         if calculated:
             results.append(_analysis_item(symbol, calculated))
+        else:
+            results.append(AnalysisItem(
+                ticker=symbol, status="unavailable", observations=0,
+                data_start=None, data_end=None, metrics={},
+            ))
     warnings = [universe_warning] if universe_warning else []
     return ScreenResponse(
         market=request.market,

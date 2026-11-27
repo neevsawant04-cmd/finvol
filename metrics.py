@@ -13,6 +13,9 @@ TRADING_DAYS = 252
 MONTH_TRADING_DAYS = 21
 EWMA_DECAY = 0.94
 EXCESS_RETURN_PRIOR_SD = 0.10
+FORECAST_MIN_TRAINING_DAYS = 252
+FORECAST_CONFIDENCE = 0.90
+FORECAST_Z_90 = 1.6448536269514722
 
 
 def annual_to_daily_rate(annual_rate: float) -> float:
@@ -43,6 +46,70 @@ def _ewma_annual_volatility(returns: pd.Series) -> float:
     if not np.isfinite(variance) or variance < 0:
         variance = clean.var(ddof=1)
     return float(np.sqrt(variance * TRADING_DAYS))
+
+
+def _posterior_log_drift(log_returns: pd.Series, annual_risk_free_rate: float) -> tuple[float, float, float]:
+    """Estimate daily log drift, EWMA volatility and shrinkage weight."""
+    clean = pd.to_numeric(log_returns, errors="coerce").dropna().astype(float)
+    if clean.empty:
+        return float("nan"), float("nan"), 0.0
+    daily_rf_log = float(np.log1p(max(-0.99, annual_risk_free_rate)) / TRADING_DAYS)
+    observed_excess_daily = float(clean.mean() - daily_rf_log)
+    sample_vol = float(clean.std(ddof=1) * np.sqrt(TRADING_DAYS)) if len(clean) > 1 else float("nan")
+    if np.isfinite(sample_vol) and sample_vol > 0:
+        annual_mean_se = sample_vol * np.sqrt(TRADING_DAYS / len(clean))
+        prior_var = EXCESS_RETURN_PRIOR_SD**2
+        weight = float(prior_var / (prior_var + annual_mean_se**2))
+    else:
+        weight = 0.0
+    daily_drift = daily_rf_log + weight * observed_excess_daily
+    variance = clean.ewm(alpha=1.0 - EWMA_DECAY, adjust=False).var(bias=False).iloc[-1]
+    if not np.isfinite(variance) or variance < 0:
+        variance = clean.var(ddof=1) if len(clean) > 1 else np.nan
+    daily_vol = float(np.sqrt(variance)) if np.isfinite(variance) and variance >= 0 else float("nan")
+    return daily_drift, daily_vol, weight
+
+
+def _forecast_interval(log_returns: pd.Series, daily_drift: float, daily_vol: float) -> tuple[float, float]:
+    """Estimate a 90% one-month log-return range using historical tail shape."""
+    clean = pd.to_numeric(log_returns, errors="coerce").dropna().astype(float)
+    expected_log_return = daily_drift * MONTH_TRADING_DAYS
+    if len(clean) >= MONTH_TRADING_DAYS + 5:
+        horizon = clean.rolling(MONTH_TRADING_DAYS).sum().dropna()
+        centered = horizon - float(clean.mean() * MONTH_TRADING_DAYS) + expected_log_return
+        lower, upper = centered.quantile([(1.0 - FORECAST_CONFIDENCE) / 2.0, (1.0 + FORECAST_CONFIDENCE) / 2.0])
+        return float(min(lower, expected_log_return)), float(max(upper, expected_log_return))
+    scale = daily_vol * np.sqrt(MONTH_TRADING_DAYS) if np.isfinite(daily_vol) else 0.0
+    return expected_log_return - FORECAST_Z_90 * scale, expected_log_return + FORECAST_Z_90 * scale
+
+
+def _walk_forward_forecast_validation(
+    prices: pd.Series, annual_risk_free_rate: float
+) -> pd.DataFrame:
+    """Generate monthly, non-overlapping 21-session forecasts using past data only."""
+    rows: list[dict[str, Any]] = []
+    final_origin = len(prices) - MONTH_TRADING_DAYS - 1
+    for origin in range(FORECAST_MIN_TRAINING_DAYS, final_origin + 1, MONTH_TRADING_DAYS):
+        training_log_returns = np.log(prices.iloc[: origin + 1]).diff().dropna()
+        daily_drift, _, _ = _posterior_log_drift(training_log_returns, annual_risk_free_rate)
+        if not np.isfinite(daily_drift):
+            continue
+        start_price = float(prices.iloc[origin])
+        actual_price = float(prices.iloc[origin + MONTH_TRADING_DAYS])
+        predicted_log_return = daily_drift * MONTH_TRADING_DAYS
+        actual_log_return = float(np.log(actual_price / start_price))
+        rows.append(
+            {
+                "origin_date": prices.index[origin],
+                "target_date": prices.index[origin + MONTH_TRADING_DAYS],
+                "predicted_return": float(np.expm1(np.clip(predicted_log_return, -20, 20))),
+                "actual_return": float(np.expm1(np.clip(actual_log_return, -20, 20))),
+                "deviation": float(np.expm1(np.clip(actual_log_return, -20, 20)) - np.expm1(np.clip(predicted_log_return, -20, 20))),
+                "forecast_price": float(start_price * np.exp(np.clip(predicted_log_return, -20, 20))),
+                "actual_price": actual_price,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def _rolling_compound_returns(returns: pd.Series, window: int) -> pd.Series:
@@ -165,6 +232,36 @@ def calculate_stock_metrics(
         if current_price is not None and np.isfinite(current_price) and current_price > 0
         else final
     )
+    log_returns = np.log(stock_prices).diff().dropna()
+    forecast_drift_daily, forecast_vol_daily, forecast_weight = _posterior_log_drift(
+        log_returns, rf_annual
+    )
+    expected_log_return = forecast_drift_daily * MONTH_TRADING_DAYS
+    lower_log_return, upper_log_return = _forecast_interval(
+        log_returns, forecast_drift_daily, forecast_vol_daily
+    )
+    forecast_return = float(np.expm1(np.clip(expected_log_return, -20, 20)))
+    forecast_price = float(spot * np.exp(np.clip(expected_log_return, -20, 20)))
+    lower_forecast_price = float(spot * np.exp(np.clip(lower_log_return, -20, 20)))
+    upper_forecast_price = float(spot * np.exp(np.clip(upper_log_return, -20, 20)))
+    validation = _walk_forward_forecast_validation(stock_prices, rf_annual)
+    if validation.empty:
+        validation_mae = validation_bias = float("nan")
+    else:
+        validation_mae = float(validation["deviation"].abs().mean())
+        validation_bias = float(validation["deviation"].mean())
+
+    historical_horizon_log_returns = log_returns.rolling(MONTH_TRADING_DAYS).sum().dropna()
+    if historical_horizon_log_returns.empty:
+        positive_probability = float("nan")
+    else:
+        centered_horizon = (
+            historical_horizon_log_returns
+            - float(log_returns.mean() * MONTH_TRADING_DAYS)
+            + expected_log_return
+        )
+        positive_probability = float((centered_horizon > 0).mean())
+
     return {
         "observations": int(len(stock_returns)),
         "current_price": spot,
@@ -185,6 +282,17 @@ def calculate_stock_metrics(
         "jensen_alpha": alpha_annual,
         "r_squared": capm["r_squared"],
         "daily_risk_free_rate": daily_rf,
+        "forecast_horizon_sessions": MONTH_TRADING_DAYS,
+        "forecast_1m_price": forecast_price,
+        "forecast_1m_return": forecast_return,
+        "forecast_1m_lower_price": lower_forecast_price,
+        "forecast_1m_upper_price": upper_forecast_price,
+        "forecast_probability_positive_1m": positive_probability,
+        "forecast_model_weight": forecast_weight,
+        "forecast_validation_mae": validation_mae,
+        "forecast_validation_bias": validation_bias,
+        "forecast_validation_count": int(len(validation)),
+        "forecast_validation": validation,
         "price_series": stock_prices,
         "benchmark_series": market_prices,
     }

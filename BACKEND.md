@@ -1,52 +1,46 @@
-# Stock Risk & Return API
+# NSE Stock Risk & Return Calculator
 
-The backend is a separate FastAPI service. It shares the same market-data loader and risk calculations as the Streamlit dashboard. The dashboard uses it when `STOCK_API_URL` is configured; without that setting, it continues to run calculations in the Streamlit process.
+The app is a Dash dashboard mounted on the same FastAPI ASGI server as the REST API. It screens the 50 current NIFTY 50 constituents, shows a one-month prediction column, and gives each ticker a forecast chart plus a walk-forward predicted-versus-actual deviation chart. NASDAQ support has been removed.
 
 ## Run locally
 
-From this folder, install the API dependencies and start the service:
+Use Python 3.12 or newer from this folder.
 
-```powershell
-py -3.12 -m venv .venv-api
-.\.venv-api\Scripts\Activate.ps1
-python -m pip install -r requirements-api.txt
-$env:STOCK_API_KEY = "choose-a-long-random-secret"
-uvicorn api:app --host 127.0.0.1 --port 8000 --reload
-```
+    py -3.12 -m venv .venv
+    .\.venv\Scripts\Activate.ps1
+    python -m pip install -r requirements.txt
+    uvicorn app:app --host 127.0.0.1 --port 8000 --reload
 
-Open `http://127.0.0.1:8000/docs` for interactive API documentation. `GET /health` is an unauthenticated liveness check. All `/v1/*` routes require `X-API-Key` when the server has `STOCK_API_KEY` set.
+Open http://127.0.0.1:8000 for the dashboard and http://127.0.0.1:8000/docs for API documentation. The API liveness endpoint is GET /health.
 
-## Endpoints
+app.py exports app, application, and handler as the shared FastAPI application, for hosts that search for a conventional top-level app variable. Dash routes are mounted on that server.
 
-- `GET /v1/markets` — market names, benchmark symbols, currencies, and built-in ticker counts.
-- `POST /v1/screen` — analyze a ticker list (up to 550 symbols) for a market and lookback.
-- `POST /v1/metrics` — metrics for one ticker.
-- `POST /v1/history` — adjusted price history for one ticker and its benchmark.
-- `POST /v1/simulation` — walk-forward volatility-target simulation with configurable target volatility and transaction costs.
+## Forecast interpretation
 
-Example screen request:
+The one-month horizon is 21 trading sessions. Point estimates use a posterior log-return drift shrunk toward the risk-free rate. The 90% price range is based on the historical distribution of overlapping 21-session log returns, shifted to the estimated drift. The error chart is a walk-forward evaluation: the model starts with 252 sessions, forecasts the next 21 sessions, then advances by 21 sessions. Its mean absolute error and mean bias summarize those historical holdouts.
 
-```json
-{
-  "market": "NASDAQ",
-  "tickers": ["AAPL", "MSFT"],
-  "period": "3y",
-  "annual_risk_free_rate": 0.0485
-}
-```
+The displayed range and point estimate are model outputs, not calibrated guarantees. Market prices can gap, historical behavior can change, and past accuracy does not ensure future accuracy. NSE constituents are current constituents, so backtests can have survivorship bias. Forecasting does not remove investment risk.
 
-The market must be `NASDAQ` or `Indian Market (NSE)`. The period must be `1y`, `3y`, or `5y`. If no ticker list is provided, the backend uses the built-in universe (the current NIFTY 500 list for NSE, with a fallback if that list cannot be fetched).
+## API
 
-## Connect Streamlit to a deployed backend
+- GET /v1/markets - NSE benchmark, currency and 50-stock universe.
+- POST /v1/screen - analyze up to 50 NSE tickers; omitting tickers uses the current NIFTY 50 list.
+- POST /v1/metrics - risk, return and one-month forecast metrics for a ticker.
+- POST /v1/history - adjusted prices for a ticker and the NIFTY benchmark.
+- POST /v1/simulation - lagged-volatility risk-control simulation.
 
-Deploy this folder as a separate Docker web service using the included `Dockerfile`. The service listens on the platform-provided `PORT` (default 8000). Set `STOCK_API_KEY` as a secret on the API service. Then add these secrets to the Streamlit app:
+The accepted market is Indian Market (NSE). Tickers must be Yahoo Finance NSE symbols ending in .NS. Periods are 1y, 3y, or 5y. Set STOCK_API_KEY to require X-API-Key on /v1/* endpoints.
 
-```toml
-STOCK_API_URL = "https://your-api-host.example"
-STOCK_API_KEY = "the-same-long-random-secret"
-```
+Example request body:
+    {"market": "Indian Market (NSE)", "tickers": ["RELIANCE.NS", "INFY.NS"], "period": "5y"}
 
-The browser never receives the API key; Streamlit sends it in a server-to-server request header. Streamlit Community Cloud runs the Streamlit process, so the API needs its own web-service deployment. Keep `/docs` private or disable it at the hosting layer if you need to hide the interactive schema page.
+## Docker and deployment
 
-Market history is cached in process memory for one hour and the NIFTY constituent list for one day. Cache entries are lost when the service restarts. The service uses Yahoo Finance through `yfinance`; data availability and request limits depend on that provider. This backend does not store user accounts, portfolios, or trade records.
+Build and run from this folder.
 
+    docker build -t nse-stock-risk .
+    docker run --rm -p 8000:8000 nse-stock-risk
+
+The included Dockerfile starts uvicorn app:app on 0.0.0.0 and uses the platform-provided PORT environment variable. For a Git-based web service, configure the start command as uvicorn app:app --host 0.0.0.0 --port $PORT (or deploy the included Dockerfile). Keep the REST API key in the host's secret environment settings.
+
+Market data is downloaded from Yahoo Finance through yfinance, and the constituent list comes from NSE Indices. Provider availability, ticker coverage and request limits can affect which of the 50 rows have usable prices on a given run.

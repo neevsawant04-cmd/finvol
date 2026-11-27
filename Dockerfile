@@ -6,11 +6,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements-api.txt ./
-RUN pip install --no-cache-dir -r requirements-api.txt
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY api.py data_loader.py metrics.py ./
+COPY app.py api.py data_loader.py metrics.py ./
+COPY assets ./assets
 
 EXPOSE 8000
-CMD ["sh", "-c", "uvicorn api:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}"]
 

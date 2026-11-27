@@ -16,7 +16,7 @@ import yfinance as yf
 
 
 def _ttl_cache(seconds: int, maxsize: int = 64):
-    """Small thread-safe TTL cache shared by the Streamlit app and API process."""
+    """Small thread-safe TTL cache shared by the dashboard and API process."""
     def decorate(function):
         cache: OrderedDict[tuple[Any, ...], tuple[float, Any]] = OrderedDict()
         lock = RLock()
@@ -46,155 +46,72 @@ def _ttl_cache(seconds: int, maxsize: int = 64):
 MARKET_PRESETS: dict[str, dict[str, Any]] = {
     "Indian Market (NSE)": {
         "tickers": [
-            "RELIANCE.NS",
-            "TCS.NS",
-            "HDFCBANK.NS",
-            "INFY.NS",
-            "ICICIBANK.NS",
-            "SBIN.NS",
-            "BHARTIARTL.NS",
-            "ITC.NS",
-            "LT.NS",
-            "BAJFINANCE.NS",
-            "KOTAKBANK.NS",
-            "AXISBANK.NS",
-            "WIPRO.NS",
-            "HCLTECH.NS",
-            "SUNPHARMA.NS",
-            "MARUTI.NS",
-            "TITAN.NS",
+            "ADANIENT.NS",
+            "ADANIPORTS.NS",
+            "APOLLOHOSP.NS",
             "ASIANPAINT.NS",
+            "AXISBANK.NS",
+            "BAJAJ-AUTO.NS",
+            "BAJAJFINSV.NS",
+            "BAJFINANCE.NS",
+            "BEL.NS",
+            "BHARTIARTL.NS",
+            "BSE.NS",
+            "CIPLA.NS",
+            "COALINDIA.NS",
+            "DRREDDY.NS",
+            "EICHERMOT.NS",
+            "ETERNAL.NS",
+            "GRASIM.NS",
+            "HCLTECH.NS",
+            "HDFCBANK.NS",
+            "HDFCLIFE.NS",
+            "HINDALCO.NS",
             "HINDUNILVR.NS",
+            "ICICIBANK.NS",
+            "INDIGO.NS",
+            "INFY.NS",
+            "ITC.NS",
+            "JIOFIN.NS",
+            "JSWSTEEL.NS",
+            "KOTAKBANK.NS",
+            "LT.NS",
+            "M&M.NS",
+            "MARUTI.NS",
+            "MAXHEALTH.NS",
+            "NESTLEIND.NS",
+            "NTPC.NS",
             "ONGC.NS",
+            "POWERGRID.NS",
+            "RELIANCE.NS",
+            "SBILIFE.NS",
+            "SBIN.NS",
+            "SHRIRAMFIN.NS",
+            "SUNPHARMA.NS",
+            "TATACONSUM.NS",
+            "TATASTEEL.NS",
+            "TCS.NS",
+            "TECHM.NS",
+            "TITAN.NS",
+            "TMPV.NS",
+            "TRENT.NS",
+            "ULTRACEMCO.NS",
         ],
         "benchmark": "^NSEI",
         "risk_free_rate": 0.072,
         "currency": "₹",
     },
-    "NASDAQ": {
-        "tickers": [
-            "AAPL",
-            "ABNB",
-            "ADBE",
-            "ADI",
-            "ADP",
-            "ADSK",
-            "AEP",
-            "ALAB",
-            "ALNY",
-            "AMAT",
-            "AMD",
-            "AMGN",
-            "AMZN",
-            "APP",
-            "ARM",
-            "ASML",
-            "AVGO",
-            "AXON",
-            "BKNG",
-            "BKR",
-            "CCEP",
-            "CDNS",
-            "CEG",
-            "CMCSA",
-            "COST",
-            "CPRT",
-            "CRWD",
-            "CRWV",
-            "CSCO",
-            "CSX",
-            "CTAS",
-            "DASH",
-            "DDOG",
-            "DXCM",
-            "EXC",
-            "FANG",
-            "FAST",
-            "FER",
-            "FTNT",
-            "GEHC",
-            "GILD",
-            "GOOG",
-            "GOOGL",
-            "HON",
-            "HONA",
-            "IDXX",
-            "INTC",
-            "INTU",
-            "ISRG",
-            "KDP",
-            "KHC",
-            "KLAC",
-            "LIN",
-            "LITE",
-            "LRCX",
-            "MAR",
-            "MCHP",
-            "MDLZ",
-            "MELI",
-            "META",
-            "MNST",
-            "MPWR",
-            "MRVL",
-            "MSFT",
-            "MSTR",
-            "MU",
-            "NBIS",
-            "NFLX",
-            "NVDA",
-            "NXPI",
-            "ODFL",
-            "ORLY",
-            "PANW",
-            "PAYX",
-            "PCAR",
-            "PDD",
-            "PEP",
-            "PLTR",
-            "PYPL",
-            "QCOM",
-            "REGN",
-            "RKLB",
-            "ROP",
-            "ROST",
-            "SBUX",
-            "SHOP",
-            "SNDK",
-            "SNPS",
-            "SPCX",
-            "STX",
-            "TER",
-            "TMUS",
-            "TRI",
-            "TSLA",
-            "TTWO",
-            "TXN",
-            "VRTX",
-            "WBD",
-            "WDAY",
-            "WDC",
-            "WMT",
-            "XEL",
-        ],
-        "benchmark": "^IXIC",
-        "risk_free_rate": 0.0485,
-        "currency": "$",
-    },
 }
 
-NIFTY500_CONSTITUENTS_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty500list.csv"
-NIFTY500_FALLBACK = tuple(MARKET_PRESETS["Indian Market (NSE)"]["tickers"])
-# Yahoo does not consistently publish new Indian listings under their NSE
-# suffix. BAGMANE is available under its BSE listing alias instead.
-YFINANCE_TICKER_FALLBACKS = {"BAGMANE.NS": ("BAGMANE.BO", "544758.BO")}
-
+NIFTY50_CONSTITUENTS_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv"
+NIFTY50_FALLBACK = tuple(MARKET_PRESETS["Indian Market (NSE)"]["tickers"])
 
 @_ttl_cache(seconds=24 * 60 * 60)
-def load_nifty500_tickers() -> tuple[tuple[str, ...], str]:
-    """Load the current NIFTY 500 constituents, falling back to the core NSE list."""
+def load_nifty50_tickers() -> tuple[tuple[str, ...], str]:
+    """Load the current NIFTY 50 constituents, falling back to 50 known symbols."""
     try:
         request = Request(
-            NIFTY500_CONSTITUENTS_URL,
+            NIFTY50_CONSTITUENTS_URL,
             headers={
                 "User-Agent": "Mozilla/5.0 (compatible; StockRiskReturnDashboard/1.0)",
                 "Referer": "https://www.niftyindices.com/",
@@ -214,12 +131,12 @@ def load_nifty500_tickers() -> tuple[tuple[str, ...], str]:
                 if symbol and symbol != "NAN" and not symbol.startswith("DUMMY")
             )
         )
-        if len(tickers) < 400:
-            raise ValueError(f"Only {len(tickers)} constituents were returned")
+        if len(tickers) != 50:
+            raise ValueError(f"Expected 50 constituents but received {len(tickers)}")
         return tickers, ""
     except Exception as exc:
-        return NIFTY500_FALLBACK, (
-            "The current NIFTY 500 list was unavailable; using the built-in NSE fallback list "
+        return NIFTY50_FALLBACK, (
+            "The current NIFTY 50 list was unavailable; using the built-in 50-stock fallback list "
             f"({type(exc).__name__})."
         )
 
@@ -295,27 +212,6 @@ def fetch_market_data(
         for symbol in batch_symbols:
             history = _extract_symbol_history(download, symbol, batch_symbols)
             prices = _clean_history(history)
-            if prices.empty:
-                for alternate in YFINANCE_TICKER_FALLBACKS.get(symbol, ()):
-                    try:
-                        alternate_download = yf.download(
-                            tickers=[alternate],
-                            period=period,
-                            auto_adjust=False,
-                            actions=False,
-                            group_by="ticker",
-                            threads=False,
-                            progress=False,
-                            timeout=20,
-                        )
-                        alternate_history = _extract_symbol_history(
-                            alternate_download, alternate, (alternate,)
-                        )
-                        prices = _clean_history(alternate_history)
-                        if not prices.empty:
-                            break
-                    except Exception:
-                        continue
             if prices.empty:
                 errors[symbol] = "No historical prices returned. Check the ticker or lookback period."
                 continue
